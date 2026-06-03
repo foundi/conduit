@@ -26,6 +26,12 @@ from conduit.utils.serialization import (
     deserialize_json_field,
     is_json_serializable,
 )
+from conduit.utils.remarkup import (
+    append_file_references,
+    has_file_reference,
+    parse_file_id_from_monogram,
+    resolve_file_identifiers,
+)
 from conduit.utils.validation import (
     TypeSafetyManager,
     RuntimeValidationClient,
@@ -62,6 +68,11 @@ __all__ = [
     "safe_serialize",
     "deserialize_json_field",
     "is_json_serializable",
+    # From remarkup.py
+    "append_file_references",
+    "has_file_reference",
+    "parse_file_id_from_monogram",
+    "resolve_file_identifiers",
     # From validation.py
     "TypeSafetyManager",
     "RuntimeValidationClient",
