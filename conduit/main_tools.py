@@ -1,3 +1,4 @@
+import base64
 from functools import wraps
 from typing import Any, Callable, Dict, List, Literal, Optional
 
@@ -22,6 +23,11 @@ from conduit.client.unified import PhabricatorClient
 
 
 from conduit.tools.handlers import handle_api_errors
+from conduit.utils.remarkup import (
+    append_file_references,
+    parse_file_id_from_monogram,
+    resolve_file_identifiers,
+)
 
 
 # Pagination Functions
@@ -134,6 +140,48 @@ def _add_pagination_metadata(result: dict, cursor: dict = None) -> dict:
         }
 
     return result
+
+
+def _read_upload_bytes(
+    content_base64: Optional[str], source_path: Optional[str]
+) -> bytes:
+    """Resolve upload source. Exactly one input must be provided."""
+    provided = [src for src in (content_base64, source_path) if src]
+    if len(provided) != 1:
+        raise ValueError(
+            "exactly one of content_base64 or source_path must be provided"
+        )
+    if content_base64:
+        return base64.b64decode(content_base64)
+    with open(source_path, "rb") as handle:
+        return handle.read()
+
+
+def _fetch_file_legacy_info(
+    client: PhabricatorClient, identifier: str
+) -> Dict[str, Any]:
+    """Look up file metadata via file.info for either monogram or PHID."""
+    if identifier.startswith("PHID-FILE-"):
+        return client.file.get_file_info_legacy(file_phid=identifier)
+    monogram_id = parse_file_id_from_monogram(identifier)
+    if monogram_id is None:
+        raise ValueError(
+            f"invalid file identifier {identifier!r}: "
+            "expected 'F<n>' or 'PHID-FILE-...'"
+        )
+    return client.file.get_file_info_legacy(file_id=monogram_id)
+
+
+def _inject_file_refs(
+    text: str,
+    file_phids: Optional[List[str]],
+    client: PhabricatorClient,
+) -> str:
+    """Append ``{F<id>}`` refs to ``text`` for any unreferenced ids."""
+    if not file_phids:
+        return text
+    ids = resolve_file_identifiers(file_phids, client.file.get_file_info)
+    return append_file_references(text, ids)
 
 
 def register_tools(  # noqa: C901
@@ -271,7 +319,10 @@ def register_tools(  # noqa: C901
     @mcp.tool()
     @handle_api_errors
     def pha_task_create(
-        title: str, description: str = "", owner_phid: str = ""
+        title: str,
+        description: str = "",
+        owner_phid: str = "",
+        file_phids: Optional[List[str]] = None,
     ) -> dict:
         """
         Create a new Phabricator task.
@@ -280,11 +331,15 @@ def register_tools(  # noqa: C901
             title: Task title
             description: Task description
             owner_phid: PHID of the user to assign this task to
+            file_phids: Optional list of file PHIDs or monograms (``F1234``)
+                to attach. Each is rendered as ``{F<id>}`` and appended to
+                the description.
 
         Returns:
             Created task information
         """
         client = get_client_func()
+        description = _inject_file_refs(description, file_phids, client)
         result = client.maniphest.create_task(
             title=title,
             description=description,
@@ -320,6 +375,7 @@ def register_tools(  # noqa: C901
         projects_add: Optional[List[str]] = None,
         projects_remove: Optional[List[str]] = None,
         projects_set: Optional[List[str]] = None,
+        file_phids: Optional[List[str]] = None,
     ) -> dict:
         """
         Update the metadata of a Phabricator task.
@@ -334,11 +390,19 @@ def register_tools(  # noqa: C901
             projects_add: List of project PHIDs to add the task to.
             projects_remove: List of project PHIDs to remove the task from.
             projects_set: List of project PHIDs to set (overwrites current projects).
+            file_phids: Optional list of file PHIDs or monograms to attach.
+                ``description`` must also be provided so we know what to
+                append the ``{F<id>}`` refs to; otherwise this raises.
 
         Returns:
             Success status.
         """
         client = get_client_func()
+
+        if file_phids and description is None:
+            raise ValueError(
+                "file_phids requires description to be provided explicitly"
+            )
 
         transactions = []
         if title is not None:
@@ -346,6 +410,9 @@ def register_tools(  # noqa: C901
                 ManiphestTaskTransactionTitle(type="title", value=title)
             )
         if description is not None:
+            description = _inject_file_refs(
+                description, file_phids, client
+            )
             transactions.append(
                 ManiphestTaskTransactionDescription(
                     type="description", value=description
@@ -390,18 +457,25 @@ def register_tools(  # noqa: C901
 
     @mcp.tool()
     @handle_api_errors
-    def pha_task_add_comment(task_id: str, comment: str) -> dict:
+    def pha_task_add_comment(
+        task_id: str,
+        comment: str,
+        file_phids: Optional[List[str]] = None,
+    ) -> dict:
         """
         Add a comment to a Phabricator task.
 
         Args:
             task_id: The ID, PHID of the task to add the comment to.
             comment: The content of the comment.
+            file_phids: Optional list of file PHIDs or monograms to attach
+                to the comment as inline ``{F<id>}`` references.
 
         Returns:
             Success status.
         """
         client = get_client_func()
+        comment = _inject_file_refs(comment, file_phids, client)
         client.maniphest.edit_task(
             object_identifier=task_id,
             transactions=[
@@ -1178,6 +1252,7 @@ def register_tools(  # noqa: C901
         revision_id: str,
         comment: str,
         action: str = "comment",
+        file_phids: Optional[List[str]] = None,
     ) -> dict:
         """
         Add a comment to a code review.
@@ -1186,12 +1261,15 @@ def register_tools(  # noqa: C901
             revision_id: Revision ID (e.g., "D123") or PHID
             comment: Comment text
             action: Review action ("comment", "accept", "reject", "request-changes")
+            file_phids: Optional list of file PHIDs or monograms to attach
+                to the comment as inline ``{F<id>}`` references.
 
         Returns:
             Success status
         """
         client = get_client_func()
 
+        comment = _inject_file_refs(comment, file_phids, client)
         transactions = [{"type": "comment", "value": comment}]
 
         if action == "accept":
@@ -1320,6 +1398,123 @@ def register_tools(  # noqa: C901
         result = client.differential.get_commit_message(revision_id=int(revision_id))
 
         return {"success": True, "commit_message": result}
+
+    # File API Tools
+
+    @mcp.tool()
+    @handle_api_errors
+    def pha_file_upload(
+        filename: str,
+        content_base64: str = "",
+        source_path: str = "",
+        mime_type: str = "",
+    ) -> dict:
+        """
+        Upload a file to Phorge.
+
+        Exactly one of `content_base64` or `source_path` must be provided.
+        Files under 4 MiB are uploaded inline via `file.allocate`; larger
+        files are split into 4 MiB chunks. SHA-256 content hashing lets
+        Phorge dedupe repeated uploads so chunked uploads of the same
+        bytes are skipped server-side.
+
+        Args:
+            filename: Logical filename (used by Phorge for MIME inference).
+            content_base64: Base64-encoded file content. Use for inline data.
+            source_path: Local filesystem path to read. In SSE/HTTP server
+                mode this is read from the server host, not the caller.
+            mime_type: Optional informational mime type.
+
+        Returns:
+            File metadata including PHID, monogram (e.g., "F1234"), the
+            `remarkup_ref` string `"{F1234}"` for inline embedding, and
+            the canonical URL.
+        """
+        data = _read_upload_bytes(
+            content_base64 or None, source_path or None
+        )
+        client = get_client_func()
+        result = client.file.upload_bytes(
+            data=data,
+            name=filename,
+            mime_type=mime_type or None,
+        )
+        result["remarkup_ref"] = f"{{F{result['id']}}}"
+        return {"success": True, "file": result}
+
+    @mcp.tool()
+    @handle_api_errors
+    def pha_file_download(file: str) -> dict:
+        """
+        Download a file by monogram (``F1234``) or PHID
+        (``PHID-FILE-...``).
+
+        Returns base64-encoded content so binary data (images, archives)
+        round-trips safely. Caller decodes if the file is text.
+        """
+        client = get_client_func()
+        info = _fetch_file_legacy_info(client, file)
+        phid = info["phid"]
+        download = client.file.download_file(file_phid=phid)
+        if isinstance(download, str):
+            content_b64 = download
+        elif isinstance(download, dict):
+            content_b64 = download.get("data_base64", "")
+        else:
+            content_b64 = ""
+        file_id = int(info["id"])
+        return {
+            "success": True,
+            "file": {
+                "phid": phid,
+                "id": file_id,
+                "monogram": f"F{file_id}",
+                "name": info.get("name", ""),
+                "mime_type": info.get("mimeType", ""),
+                "size_bytes": int(info.get("byteSize") or 0),
+                "content_base64": content_b64,
+            },
+        }
+
+    @mcp.tool()
+    @handle_api_errors
+    def pha_file_info(file: str) -> dict:
+        """Look up metadata for a single file by monogram or PHID."""
+        client = get_client_func()
+        return {
+            "success": True,
+            "file": _fetch_file_legacy_info(client, file),
+        }
+
+    @mcp.tool()
+    @handle_api_errors
+    @optimize_token_usage
+    def pha_file_search(
+        name_contains: str = "",
+        author_phid: str = "",
+        limit: int = 100,
+    ) -> dict:
+        """
+        Search/list files by metadata.
+
+        Args:
+            name_contains: Substring match against the filename.
+            author_phid: Restrict to files uploaded by this user PHID.
+            limit: Maximum number of results (default 100).
+
+        Returns:
+            ``file.search`` result with file records and pagination.
+        """
+        client = get_client_func()
+        constraints: Dict[str, Any] = {}
+        if name_contains:
+            constraints["name"] = name_contains
+        if author_phid:
+            constraints["authorPHIDs"] = [author_phid]
+        result = client.file.search_files(
+            constraints=constraints, limit=limit
+        )
+        return {"success": True, "files": result}
 
     # Project API Tools
 
