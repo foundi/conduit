@@ -14,7 +14,11 @@ from conduit.client.types import (
     ManiphestTaskTransactionProjectsAdd,
     ManiphestTaskTransactionProjectsRemove,
     ManiphestTaskTransactionProjectsSet,
+    ManiphestTaskTransactionSpace,
     ManiphestTaskTransactionStatus,
+    ManiphestTaskTransactionSubscribersAdd,
+    ManiphestTaskTransactionSubscribersRemove,
+    ManiphestTaskTransactionSubscribersSet,
     ManiphestTaskTransactionTitle,
     UserSearchAttachments,
     UserSearchConstraints,
@@ -322,6 +326,8 @@ def register_tools(  # noqa: C901
         title: str,
         description: str = "",
         owner_phid: str = "",
+        space: Optional[str] = None,
+        subscribers: Optional[List[str]] = None,
         file_phids: Optional[List[str]] = None,
     ) -> dict:
         """
@@ -331,21 +337,56 @@ def register_tools(  # noqa: C901
             title: Task title
             description: Task description
             owner_phid: PHID of the user to assign this task to
-            file_phids: Optional list of file PHIDs or monograms (``F1234``)
-                to attach. Each is rendered as ``{F<id>}`` and appended to
-                the description.
+            space: PHID of the Space to file the task into (e.g.
+                "PHID-SPCE-..."). The task inherits that Space's access
+                policy. Omit to use the default Space.
+            subscribers: List of subscriber PHIDs or usernames to CC on
+                the new task (overwrites the default subscriber set).
+            file_phids: Optional list of file PHIDs or monograms
+                (``F1234``) to attach. Each is rendered as ``{F<id>}``
+                and appended to the description.
 
         Returns:
             Created task information
         """
         client = get_client_func()
         description = _inject_file_refs(description, file_phids, client)
-        result = client.maniphest.create_task(
-            title=title,
-            description=description,
-            owner_phid=owner_phid,
+        transactions = [
+            ManiphestTaskTransactionTitle(type="title", value=title)
+        ]
+        if description:
+            transactions.append(
+                ManiphestTaskTransactionDescription(
+                    type="description", value=description
+                )
+            )
+        if owner_phid:
+            transactions.append(
+                ManiphestTaskTransactionOwner(
+                    type="owner", value=owner_phid
+                )
+            )
+        if space is not None:
+            transactions.append(
+                ManiphestTaskTransactionSpace(type="space", value=space)
+            )
+        if subscribers is not None:
+            transactions.append(
+                ManiphestTaskTransactionSubscribersSet(
+                    type="subscribers.set", value=subscribers
+                )
+            )
+        result = client.maniphest.edit_task(
+            object_identifier=None, transactions=transactions
         )
-        return {"success": True, "task": result}
+        # maniphest.edit returns {"object": {...}, "transactions": [...]};
+        # surface the created object as `task` for a stable return shape.
+        task = (
+            result.get("object", result)
+            if isinstance(result, dict)
+            else result
+        )
+        return {"success": True, "task": task}
 
     @mcp.tool()
     @handle_api_errors
@@ -375,6 +416,9 @@ def register_tools(  # noqa: C901
         projects_add: Optional[List[str]] = None,
         projects_remove: Optional[List[str]] = None,
         projects_set: Optional[List[str]] = None,
+        subscribers_add: Optional[List[str]] = None,
+        subscribers_remove: Optional[List[str]] = None,
+        subscribers_set: Optional[List[str]] = None,
         file_phids: Optional[List[str]] = None,
     ) -> dict:
         """
@@ -389,7 +433,13 @@ def register_tools(  # noqa: C901
             owner_phid: The PHID of the new owner for the task.
             projects_add: List of project PHIDs to add the task to.
             projects_remove: List of project PHIDs to remove the task from.
-            projects_set: List of project PHIDs to set (overwrites current projects).
+            projects_set: List of project PHIDs to set (overwrites current
+                projects).
+            subscribers_add: List of subscriber PHIDs or usernames to add.
+            subscribers_remove: List of subscriber PHIDs or usernames to
+                remove.
+            subscribers_set: List of subscriber PHIDs or usernames to set
+                (overwrites current subscribers).
             file_phids: Optional list of file PHIDs or monograms to attach.
                 ``description`` must also be provided so we know what to
                 append the ``{F<id>}`` refs to; otherwise this raises.
@@ -446,6 +496,24 @@ def register_tools(  # noqa: C901
             transactions.append(
                 ManiphestTaskTransactionProjectsSet(
                     type="projects.set", value=projects_set
+                )
+            )
+        if subscribers_add is not None:
+            transactions.append(
+                ManiphestTaskTransactionSubscribersAdd(
+                    type="subscribers.add", value=subscribers_add
+                )
+            )
+        if subscribers_remove is not None:
+            transactions.append(
+                ManiphestTaskTransactionSubscribersRemove(
+                    type="subscribers.remove", value=subscribers_remove
+                )
+            )
+        if subscribers_set is not None:
+            transactions.append(
+                ManiphestTaskTransactionSubscribersSet(
+                    type="subscribers.set", value=subscribers_set
                 )
             )
 

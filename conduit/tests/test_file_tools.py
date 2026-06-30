@@ -259,29 +259,31 @@ class TestPhaFileSearch:
 class TestPhaTaskCreateWithFiles:
     def test_no_file_phids_unchanged(self, tools):
         functions, client = tools
-        client.maniphest.create_task.return_value = {"id": 1}
+        client.maniphest.edit_task.return_value = {"object": {"id": 1}}
 
         functions["pha_task_create"](title="t", description="body")
 
-        client.maniphest.create_task.assert_called_once_with(
-            title="t", description="body", owner_phid=""
-        )
+        txns = client.maniphest.edit_task.call_args.kwargs["transactions"]
+        title_txns = [t for t in txns if t["type"] == "title"]
+        desc_txns = [t for t in txns if t["type"] == "description"]
+        assert title_txns == [{"type": "title", "value": "t"}]
+        assert desc_txns == [{"type": "description", "value": "body"}]
 
     def test_appends_file_refs_to_description(self, tools):
         functions, client = tools
-        client.maniphest.create_task.return_value = {"id": 1}
+        client.maniphest.edit_task.return_value = {"object": {"id": 1}}
 
         functions["pha_task_create"](
             title="t", description="body", file_phids=["F42"]
         )
 
-        client.maniphest.create_task.assert_called_once_with(
-            title="t", description="body\n\n{F42}", owner_phid=""
-        )
+        txns = client.maniphest.edit_task.call_args.kwargs["transactions"]
+        desc_txns = [t for t in txns if t["type"] == "description"]
+        assert desc_txns[0]["value"] == "body\n\n{F42}"
 
     def test_idempotent_when_ref_already_present(self, tools):
         functions, client = tools
-        client.maniphest.create_task.return_value = {"id": 1}
+        client.maniphest.edit_task.return_value = {"object": {"id": 1}}
 
         functions["pha_task_create"](
             title="t",
@@ -289,9 +291,62 @@ class TestPhaTaskCreateWithFiles:
             file_phids=["F42"],
         )
 
-        client.maniphest.create_task.assert_called_once_with(
-            title="t", description="see {F42}", owner_phid=""
+        txns = client.maniphest.edit_task.call_args.kwargs["transactions"]
+        desc_txns = [t for t in txns if t["type"] == "description"]
+        assert desc_txns[0]["value"] == "see {F42}"
+
+
+class TestPhaTaskCreateSpace:
+    def test_space_given_includes_space_transaction(self, tools):
+        functions, client = tools
+        client.maniphest.edit_task.return_value = {"object": {"id": 1}}
+
+        functions["pha_task_create"](title="t", space="PHID-SPCE-x")
+
+        txns = client.maniphest.edit_task.call_args.kwargs["transactions"]
+        space_txns = [t for t in txns if t["type"] == "space"]
+        assert space_txns == [{"type": "space", "value": "PHID-SPCE-x"}]
+
+    def test_space_omitted_produces_no_space_transaction(self, tools):
+        functions, client = tools
+        client.maniphest.edit_task.return_value = {"object": {"id": 1}}
+
+        functions["pha_task_create"](title="t")
+
+        txns = client.maniphest.edit_task.call_args.kwargs["transactions"]
+        space_txns = [t for t in txns if t["type"] == "space"]
+        assert space_txns == []
+
+    def test_space_with_owner_includes_both_transactions(self, tools):
+        functions, client = tools
+        client.maniphest.edit_task.return_value = {"object": {"id": 1}}
+
+        functions["pha_task_create"](
+            title="t",
+            owner_phid="PHID-USER-y",
+            space="PHID-SPCE-x",
         )
+
+        txns = client.maniphest.edit_task.call_args.kwargs["transactions"]
+        space_txns = [t for t in txns if t["type"] == "space"]
+        owner_txns = [t for t in txns if t["type"] == "owner"]
+        assert space_txns == [{"type": "space", "value": "PHID-SPCE-x"}]
+        assert owner_txns == [{"type": "owner", "value": "PHID-USER-y"}]
+
+    def test_subscribers_produces_correct_transaction(self, tools):
+        functions, client = tools
+        client.maniphest.edit_task.return_value = {"object": {"id": 1}}
+
+        functions["pha_task_create"](
+            title="t",
+            subscribers=["alice", "PHID-USER-b"],
+        )
+
+        txns = client.maniphest.edit_task.call_args.kwargs["transactions"]
+        assert {
+            "type": "subscribers.set",
+            "value": ["alice", "PHID-USER-b"],
+        } in txns
 
 
 class TestPhaTaskUpdateWithFiles:
@@ -330,6 +385,65 @@ class TestPhaTaskUpdateWithFiles:
         assert result["success"] is False
         assert "description" in result["error"]
         assert result["error_code"] == "VALIDATION_ERROR"
+
+
+class TestPhaTaskUpdateSubscribers:
+    def test_subscribers_set_produces_correct_transaction(self, tools):
+        functions, client = tools
+
+        functions["pha_task_update"](
+            task_id="T1",
+            subscribers_set=["PHID-USER-a", "PHID-USER-b"],
+        )
+
+        txns = client.maniphest.edit_task.call_args.kwargs[
+            "transactions"
+        ]
+        assert len(txns) == 1
+        assert txns[0] == {
+            "type": "subscribers.set",
+            "value": ["PHID-USER-a", "PHID-USER-b"],
+        }
+
+    def test_subscribers_add_and_remove_produce_both_transactions(
+        self, tools
+    ):
+        functions, client = tools
+
+        functions["pha_task_update"](
+            task_id="T1",
+            subscribers_add=["PHID-USER-a"],
+            subscribers_remove=["PHID-USER-b"],
+        )
+
+        txns = client.maniphest.edit_task.call_args.kwargs[
+            "transactions"
+        ]
+        add_txns = [t for t in txns if t["type"] == "subscribers.add"]
+        remove_txns = [
+            t for t in txns if t["type"] == "subscribers.remove"
+        ]
+        assert add_txns == [
+            {"type": "subscribers.add", "value": ["PHID-USER-a"]}
+        ]
+        assert remove_txns == [
+            {"type": "subscribers.remove", "value": ["PHID-USER-b"]}
+        ]
+
+    def test_only_title_produces_no_subscriber_transactions(self, tools):
+        functions, client = tools
+
+        functions["pha_task_update"](task_id="T1", title="new title")
+
+        txns = client.maniphest.edit_task.call_args.kwargs[
+            "transactions"
+        ]
+        subscriber_types = {
+            "subscribers.add",
+            "subscribers.remove",
+            "subscribers.set",
+        }
+        assert not any(t["type"] in subscriber_types for t in txns)
 
 
 class TestPhaTaskAddCommentWithFiles:
