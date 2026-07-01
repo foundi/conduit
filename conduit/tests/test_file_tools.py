@@ -13,6 +13,7 @@ import pytest
 from conduit.main_tools import (
     _fetch_file_legacy_info,
     _inject_file_refs,
+    _load_task_template,
     _read_upload_bytes,
     register_tools,
 )
@@ -520,3 +521,158 @@ class TestPhaDiffAddCommentWithFiles:
         ]
         comment_txn = next(t for t in txns if t["type"] == "comment")
         assert comment_txn["value"] == "see {F11}"
+
+
+# Shared template fixture data used across TestPhaTaskCreateFromTemplate.
+_TEMPLATE_SEARCH_RESULT = {
+    "data": [
+        {
+            "fields": {
+                "policy": {
+                    "view": "PHID-PROJ-acct",
+                    "edit": "PHID-PROJ-acct",
+                },
+                "spacePHID": "PHID-SPCE-x",
+                "ownerPHID": "PHID-USER-owner",
+                "subtype": "default",
+                "priority": {"value": 80},
+                "description": {"raw": "tpl body"},
+                "custom.foundi:type": "external",
+                "custom.foundi:schedule": "Q2",
+            },
+            "attachments": {
+                "projects": {"projectPHIDs": ["PHID-PROJ-a"]},
+                "subscribers": {"subscriberPHIDs": ["PHID-USER-s1"]},
+            },
+        }
+    ]
+}
+_PRIORITY_INFO = {
+    "data": [
+        {"value": 80, "keywords": ["high"]},
+        {"value": 50, "keywords": ["normal"]},
+    ]
+}
+
+
+def _txns_by_type(tools_fixture, **kwargs):
+    """Call pha_task_create and return transactions indexed by type."""
+    functions, client = tools_fixture
+    client.maniphest.edit_task.return_value = {"object": {"id": 99}}
+    client.maniphest.search_tasks.return_value = _TEMPLATE_SEARCH_RESULT
+    client.maniphest.get_priority_info.return_value = _PRIORITY_INFO
+
+    functions["pha_task_create"](**kwargs)
+
+    txns = client.maniphest.edit_task.call_args.kwargs["transactions"]
+    index = {}
+    for txn in txns:
+        index[txn["type"]] = txn
+    return index
+
+
+class TestPhaTaskCreateFromTemplate:
+    def test_template_inherits_view_and_edit_policy(self, tools):
+        index = _txns_by_type(
+            tools, title="new", template_task_id="T42"
+        )
+        assert index["view"] == {
+            "type": "view", "value": "PHID-PROJ-acct"
+        }
+        assert index["edit"] == {
+            "type": "edit", "value": "PHID-PROJ-acct"
+        }
+
+    def test_template_inherits_projects_subscribers_space_owner(
+        self, tools
+    ):
+        index = _txns_by_type(
+            tools, title="new", template_task_id="T42"
+        )
+        assert index["projects.set"] == {
+            "type": "projects.set", "value": ["PHID-PROJ-a"]
+        }
+        assert index["subscribers.set"] == {
+            "type": "subscribers.set", "value": ["PHID-USER-s1"]
+        }
+        assert index["space"] == {
+            "type": "space", "value": "PHID-SPCE-x"
+        }
+        assert index["owner"] == {
+            "type": "owner", "value": "PHID-USER-owner"
+        }
+
+    def test_template_maps_priority_value_to_keyword(self, tools):
+        index = _txns_by_type(
+            tools, title="new", template_task_id="T42"
+        )
+        assert index["priority"] == {
+            "type": "priority", "value": "high"
+        }
+
+    def test_template_inherits_custom_fields(self, tools):
+        index = _txns_by_type(
+            tools, title="new", template_task_id="T42"
+        )
+        assert index["custom.foundi:type"] == {
+            "type": "custom.foundi:type", "value": "external"
+        }
+        assert index["custom.foundi:schedule"] == {
+            "type": "custom.foundi:schedule", "value": "Q2"
+        }
+
+    def test_default_subtype_is_not_emitted(self, tools):
+        index = _txns_by_type(
+            tools, title="new", template_task_id="T42"
+        )
+        assert "subtype" not in index
+
+    def test_caller_overrides_subscribers_description_and_title(
+        self, tools
+    ):
+        functions, client = tools
+        client.maniphest.edit_task.return_value = {"object": {"id": 99}}
+        client.maniphest.search_tasks.return_value = _TEMPLATE_SEARCH_RESULT
+        client.maniphest.get_priority_info.return_value = _PRIORITY_INFO
+
+        functions["pha_task_create"](
+            title="new",
+            description="my body",
+            subscribers=["PHID-USER-override"],
+            template_task_id="T42",
+        )
+
+        txns = client.maniphest.edit_task.call_args.kwargs["transactions"]
+        index = {t["type"]: t for t in txns}
+
+        assert index["title"]["value"] == "new"
+        assert index["description"]["value"] == "my body"
+        assert index["subscribers.set"]["value"] == ["PHID-USER-override"]
+
+    def test_not_found_template_returns_failure(self, tools):
+        functions, client = tools
+        client.maniphest.search_tasks.return_value = {"data": []}
+        client.maniphest.get_priority_info.return_value = _PRIORITY_INFO
+
+        result = functions["pha_task_create"](
+            title="t", template_task_id="T999"
+        )
+
+        assert result["success"] is False
+        assert "not found" in result["error"].lower()
+
+    def test_no_template_emits_only_basic_transactions(self, tools):
+        functions, client = tools
+        client.maniphest.edit_task.return_value = {"object": {"id": 1}}
+
+        functions["pha_task_create"](title="t", description="body")
+
+        txns = client.maniphest.edit_task.call_args.kwargs["transactions"]
+        types = {t["type"] for t in txns}
+        assert types == {"title", "description"}
+        assert "view" not in types
+        assert "edit" not in types
+        assert "projects.set" not in types
+        assert "priority" not in types
+        assert "subtype" not in types
+        assert "custom.foundi:type" not in types
