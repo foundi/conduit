@@ -1,8 +1,9 @@
 """Mock-based tests for the file-related MCP tools.
 
-These tests register tools against a lightweight :class:`CapturingMCP` and
-exercise the resulting functions directly, mocking the underlying
-``PhabricatorClient`` rather than the FastMCP server itself.
+These tests register tools against the shared :class:`CapturingMCP` stub
+(see ``conduit/tests/conftest.py``) and exercise the resulting functions
+directly, mocking the underlying ``PhabricatorClient`` rather than the
+FastMCP server itself.
 """
 
 import base64
@@ -14,30 +15,7 @@ from conduit.main_tools import (
     _fetch_file_legacy_info,
     _inject_file_refs,
     _read_upload_bytes,
-    register_tools,
 )
-
-
-class CapturingMCP:
-    """Stand-in for ``FastMCP`` that records registered tool functions."""
-
-    def __init__(self):
-        self.tools = {}
-
-    def tool(self, *args, **kwargs):
-        def decorator(func):
-            self.tools[func.__name__] = func
-            return func
-
-        return decorator
-
-
-@pytest.fixture
-def tools():
-    mcp = CapturingMCP()
-    client = MagicMock()
-    register_tools(mcp, lambda: client)
-    return mcp.tools, client
 
 
 class TestReadUploadBytes:
@@ -260,6 +238,58 @@ class TestPhaFileSearch:
         client.file.search_files.assert_called_once_with(
             constraints={}, order=None, after=None, limit=100
         )
+
+    def test_forwards_after_and_order(self, tools):
+        functions, client = tools
+        client.file.search_files.return_value = {
+            "data": [], "cursor": {"after": None}
+        }
+
+        functions["pha_file_search"](after="cursor-x", order="newest")
+
+        kwargs = client.file.search_files.call_args.kwargs
+        assert kwargs["after"] == "cursor-x"
+        assert kwargs["order"] == "newest"
+
+    def test_converts_empty_after_and_order_to_none(self, tools):
+        functions, client = tools
+        client.file.search_files.return_value = {
+            "data": [], "cursor": {"after": None}
+        }
+
+        functions["pha_file_search"]()
+
+        kwargs = client.file.search_files.call_args.kwargs
+        assert kwargs["order"] is None
+        assert kwargs["after"] is None
+
+    def test_returns_after_when_cursor_has_it(self, tools):
+        functions, client = tools
+        client.file.search_files.return_value = {
+            "data": [], "cursor": {"after": "abc", "limit": 100}
+        }
+
+        result = functions["pha_file_search"]()
+
+        assert result["next_after"] == "abc"
+
+    def test_returns_none_when_cursor_after_is_none(self, tools):
+        functions, client = tools
+        client.file.search_files.return_value = {
+            "data": [], "cursor": {"after": None}
+        }
+
+        result = functions["pha_file_search"]()
+
+        assert result["next_after"] is None
+
+    def test_returns_none_when_cursor_key_missing(self, tools):
+        functions, client = tools
+        client.file.search_files.return_value = {"data": []}
+
+        result = functions["pha_file_search"]()
+
+        assert result["next_after"] is None
 
 
 class TestPhaTaskCreateWithFiles:

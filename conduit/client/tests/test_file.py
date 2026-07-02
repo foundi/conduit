@@ -461,3 +461,43 @@ class TestFileClient:
             },
         )
         assert result["id"] == 123
+
+
+class TestFileClientSearchPagination:
+    """Test cursor pagination params on FileClient.search_files."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.client = FileClient(
+            api_url="http://test.example.com/api/", api_token="test_token"
+        )
+
+    @patch("conduit.client.base.BasePhabricatorClient._make_request")
+    def test_search_files_forwards_pagination_params(self, mock_request):
+        """Pagination params are serialized into the request payload."""
+        mock_request.return_value = {"data": []}
+
+        self.client.search_files(
+            order="newest", before="10", after="42", limit=50
+        )
+
+        mock_request.assert_called_once_with(
+            "file.search",
+            {
+                "limit": 50,
+                "order": "newest",
+                "before": "10",
+                "after": "42",
+            },
+        )
+
+    @patch("conduit.client.base.BasePhabricatorClient._make_request")
+    def test_search_files_omits_pagination_by_default(self, mock_request):
+        """Pagination params are absent from the payload when unset."""
+        mock_request.return_value = {"data": []}
+
+        self.client.search_files()
+
+        mock_request.assert_called_once_with(
+            "file.search", {"limit": 100}
+        )
