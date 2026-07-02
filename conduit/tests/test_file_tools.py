@@ -232,7 +232,10 @@ class TestPhaFileSearch:
 
         assert result["success"] is True
         client.file.search_files.assert_called_once_with(
-            constraints={"name": "report"}, limit=100
+            constraints={"name": "report"},
+            order=None,
+            after=None,
+            limit=100,
         )
 
     def test_search_with_author(self, tools):
@@ -242,7 +245,10 @@ class TestPhaFileSearch:
         functions["pha_file_search"](author_phid="PHID-USER-1", limit=10)
 
         client.file.search_files.assert_called_once_with(
-            constraints={"authorPHIDs": ["PHID-USER-1"]}, limit=10
+            constraints={"authorPHIDs": ["PHID-USER-1"]},
+            order=None,
+            after=None,
+            limit=10,
         )
 
     def test_search_empty_constraints(self, tools):
@@ -252,7 +258,7 @@ class TestPhaFileSearch:
         functions["pha_file_search"]()
 
         client.file.search_files.assert_called_once_with(
-            constraints={}, limit=100
+            constraints={}, order=None, after=None, limit=100
         )
 
 

@@ -142,6 +142,43 @@ def _add_pagination_metadata(result: dict, cursor: dict = None) -> dict:
     return result
 
 
+def _cursor_next_after(result: dict) -> Optional[str]:
+    """Extract the next-page cursor from a raw *.search result.
+
+    Args:
+        result: Raw result dict from a Conduit ``*.search`` call.
+
+    Returns:
+        Cursor string for the next page, or None when the API
+        reports no further pages.
+    """
+    cursor = result.get("cursor") or {}
+    return cursor.get("after")
+
+
+def _paged_search_response(key: str, result: dict) -> dict:
+    """Build the standard search-tool envelope with pagination.
+
+    Adds the legacy ``pagination`` block to ``result`` and a
+    top-level ``next_after`` cursor to the envelope.
+
+    Args:
+        key: Response dict key under which to nest ``result``
+            (e.g. "files", "commits").
+        result: Raw result dict from a Conduit ``*.search`` call.
+
+    Returns:
+        Envelope dict with ``success``, the keyed result, and
+        ``next_after``.
+    """
+    result = _add_pagination_metadata(result, result.get("cursor"))
+    return {
+        "success": True,
+        key: result,
+        "next_after": _cursor_next_after(result),
+    }
+
+
 def _read_upload_bytes(
     content_base64: Optional[str], source_path: Optional[str]
 ) -> bytes:
@@ -229,6 +266,7 @@ def register_tools(  # noqa: C901
         created_end: int = None,
         fulltext_query: str = "",
         order: str = "",
+        after: str = "",
         include_availability: bool = False,
         limit: int = 100,
     ) -> dict:
@@ -251,11 +289,16 @@ def register_tools(  # noqa: C901
             created_end: Unix timestamp - find users created before this time
             fulltext_query: Full-text search query string
             order: Result ordering ("newest", "oldest", "relevance")
+            after: Opaque cursor from a previous call's ``next_after``;
+                fetches the next page. Pass the same filters and order
+                as the original call.
             include_availability: Include user availability information in results
             limit: Maximum number of results to return (default: 100, max: 1000)
 
         Returns:
-            Search results with user data and pagination metadata
+            Search results with user data and pagination metadata,
+            plus ``next_after`` (cursor string for the next page,
+            or null when no more results exist).
         """
         # Initialize None parameters to empty lists
         if ids is None:
@@ -308,13 +351,19 @@ def register_tools(  # noqa: C901
             constraints=constraints if constraints else None,
             attachments=attachments if attachments else None,
             order=order or None,
+            after=after or None,
             limit=limit,
         )
 
         # Add pagination metadata
         result = _add_pagination_metadata(result, result.get("cursor"))
 
-        return {"success": True, "users": result["data"], "cursor": result["cursor"]}
+        return {
+            "success": True,
+            "users": result.get("data", []),
+            "cursor": result.get("cursor"),
+            "next_after": _cursor_next_after(result),
+        }
 
     @mcp.tool()
     @handle_api_errors
@@ -637,6 +686,7 @@ def register_tools(  # noqa: C901
         modified_after: int = None,
         modified_before: int = None,
         order: str = "",
+        after: str = "",
         include_subscribers: bool = False,
         include_projects: bool = False,
         include_columns: bool = False,
@@ -664,6 +714,9 @@ def register_tools(  # noqa: C901
             modified_after: Unix timestamp - tasks modified after this time
             modified_before: Unix timestamp - tasks modified before this time
             order: Result ordering ("priority", "updated", "newest", "oldest", "closed", "title", "relevance")
+            after: Opaque cursor from a previous call's ``next_after``;
+                fetches the next page. Pass the same filters and order
+                as the original call.
             include_subscribers: Include subscriber information in results
             include_projects: Include project information in results
             include_columns: Include workboard column information in results
@@ -671,7 +724,9 @@ def register_tools(  # noqa: C901
             preset: Preset search configurations for common use cases
 
         Returns:
-            Search results with task data and pagination metadata
+            Search results with task data and pagination metadata,
+            plus ``next_after`` (cursor string for the next page,
+            or null when no more results exist).
         """
         # Initialize None parameters to empty lists
         if assigned is None:
@@ -760,13 +815,11 @@ def register_tools(  # noqa: C901
             constraints=constraints if constraints else None,
             attachments=attachments if attachments else None,
             order=order or None,
+            after=after or None,
             limit=limit,
         )
 
-        # Add pagination metadata
-        result = _add_pagination_metadata(result, result.get("cursor"))
-
-        return {"success": True, "results": result}
+        return _paged_search_response("results", result)
 
     # Diffusion (Repository) Tools
 
@@ -775,6 +828,8 @@ def register_tools(  # noqa: C901
     @optimize_token_usage
     def pha_repository_search(
         constraints: Dict[str, Any] = None,
+        order: str = "",
+        after: str = "",
         limit: int = 50,
     ) -> dict:
         """
@@ -782,10 +837,16 @@ def register_tools(  # noqa: C901
 
         Args:
             constraints: Search constraints dictionary (e.g., {"query": "repo_name", "vcs": "git"})
+            order: Result ordering (e.g. "newest", "oldest")
+            after: Opaque cursor from a previous call's ``next_after``;
+                fetches the next page. Pass the same filters and order
+                as the original call.
             limit: Maximum number of results to return (default: 50, max: 500)
 
         Returns:
-            Repository search results with data list and pagination metadata
+            Repository search results with data list and pagination
+            metadata, plus ``next_after`` (cursor string for the next
+            page, or null when no more results exist).
         """
         client = get_client_func()
 
@@ -793,13 +854,13 @@ def register_tools(  # noqa: C901
             constraints = {}
 
         result = client.diffusion.search_repositories(
-            constraints=constraints if constraints else None, limit=limit
+            constraints=constraints if constraints else None,
+            order=order or None,
+            after=after or None,
+            limit=limit,
         )
 
-        # Add pagination metadata
-        result = _add_pagination_metadata(result, result.get("cursor"))
-
-        return {"success": True, "repositories": result}
+        return _paged_search_response("repositories", result)
 
     @mcp.tool()
     @handle_api_errors
@@ -1045,6 +1106,8 @@ def register_tools(  # noqa: C901
         repository: str = "",
         author: str = "",
         message_contains: str = "",
+        order: str = "",
+        after: str = "",
         limit: int = 20,
     ) -> dict:
         """
@@ -1054,10 +1117,16 @@ def register_tools(  # noqa: C901
             repository: Repository identifier to search in (optional)
             author: Filter by commit author
             message_contains: Filter by commit message containing this text
+            order: Result ordering (e.g. "newest", "oldest")
+            after: Opaque cursor from a previous call's ``next_after``;
+                fetches the next page. Pass the same filters and order
+                as the original call.
             limit: Maximum number of results to return
 
         Returns:
-            List of matching commits
+            List of matching commits, plus ``next_after`` (cursor
+            string for the next page, or null when no more results
+            exist).
         """
         client = get_client_func()
 
@@ -1070,10 +1139,13 @@ def register_tools(  # noqa: C901
             constraints["query"] = message_contains
 
         result = client.diffusion.search_commits(
-            constraints=constraints if constraints else None, limit=limit
+            constraints=constraints if constraints else None,
+            order=order or None,
+            after=after or None,
+            limit=limit,
         )
 
-        return {"success": True, "commits": result}
+        return _paged_search_response("commits", result)
 
     # Differential (Code Review) Tools
 
@@ -1169,6 +1241,8 @@ def register_tools(  # noqa: C901
         status: str = "",
         repository: str = "",
         title_contains: str = "",
+        order: str = "",
+        after: str = "",
         limit: int = 50,
     ) -> dict:
         """
@@ -1180,10 +1254,16 @@ def register_tools(  # noqa: C901
             status: Filter by status ("open", "closed", "abandoned", "accepted")
             repository: Filter by repository PHID (recommended) or name
             title_contains: Filter by title containing this text
+            order: Result ordering (e.g. "newest", "oldest")
+            after: Opaque cursor from a previous call's ``next_after``;
+                fetches the next page. Pass the same filters and order
+                as the original call.
             limit: Maximum number of results to return (default: 50, max: 500)
 
         Returns:
-            List of matching code reviews with pagination metadata
+            List of matching code reviews with pagination metadata,
+            plus ``next_after`` (cursor string for the next page, or
+            null when no more results exist).
         """
         client = get_client_func()
 
@@ -1200,13 +1280,13 @@ def register_tools(  # noqa: C901
             constraints["query"] = title_contains
 
         result = client.differential.search_revisions(
-            constraints=constraints if constraints else None, limit=limit
+            constraints=constraints if constraints else None,
+            order=order or None,
+            after=after or None,
+            limit=limit,
         )
 
-        # Add pagination metadata
-        result = _add_pagination_metadata(result, result.get("cursor"))
-
-        return {"success": True, "revisions": result}
+        return _paged_search_response("revisions", result)
 
     @mcp.tool()
     @handle_api_errors
@@ -1492,6 +1572,8 @@ def register_tools(  # noqa: C901
     def pha_file_search(
         name_contains: str = "",
         author_phid: str = "",
+        order: str = "",
+        after: str = "",
         limit: int = 100,
     ) -> dict:
         """
@@ -1500,10 +1582,16 @@ def register_tools(  # noqa: C901
         Args:
             name_contains: Substring match against the filename.
             author_phid: Restrict to files uploaded by this user PHID.
+            order: Result ordering (e.g. "newest", "oldest").
+            after: Opaque cursor from a previous call's ``next_after``;
+                fetches the next page. Pass the same filters and order
+                as the original call.
             limit: Maximum number of results (default 100).
 
         Returns:
-            ``file.search`` result with file records and pagination.
+            ``file.search`` result with file records and pagination,
+            plus ``next_after`` (cursor string for the next page, or
+            null when no more results exist).
         """
         client = get_client_func()
         constraints: Dict[str, Any] = {}
@@ -1512,9 +1600,12 @@ def register_tools(  # noqa: C901
         if author_phid:
             constraints["authorPHIDs"] = [author_phid]
         result = client.file.search_files(
-            constraints=constraints, limit=limit
+            constraints=constraints,
+            order=order or None,
+            after=after or None,
+            limit=limit,
         )
-        return {"success": True, "files": result}
+        return _paged_search_response("files", result)
 
     # Project API Tools
 
@@ -1536,6 +1627,8 @@ def register_tools(  # noqa: C901
         has_parent: bool = None,
         icon: str = "",
         color: str = "",
+        order: str = "",
+        after: str = "",
         limit: int = 100,
     ) -> dict:
         """
@@ -1556,10 +1649,16 @@ def register_tools(  # noqa: C901
             has_parent: Filter for projects with/without parents
             icon: Filter by project icon
             color: Filter by project color
+            order: Result ordering (e.g. "newest", "oldest")
+            after: Opaque cursor from a previous call's ``next_after``;
+                fetches the next page. Pass the same filters and order
+                as the original call.
             limit: Maximum number of results to return (default: 100, max: 1000)
 
         Returns:
-            Search results with project data and pagination metadata
+            Search results with project data and pagination metadata,
+            plus ``next_after`` (cursor string for the next page, or
+            null when no more results exist).
         """
         # Initialize None parameters to empty lists
         if ids is None:
@@ -1601,13 +1700,12 @@ def register_tools(  # noqa: C901
 
         result = client.project.search_projects(
             constraints=constraints if constraints else None,
+            order=order or None,
+            after=after or None,
             limit=limit,
         )
 
-        # Add pagination metadata
-        result = _add_pagination_metadata(result, result.get("cursor"))
-
-        return {"success": True, "projects": result}
+        return _paged_search_response("projects", result)
 
     @mcp.tool()
     @handle_api_errors
@@ -1764,6 +1862,8 @@ def register_tools(  # noqa: C901
     def pha_workboard_search_columns(
         project_phids: Optional[List[str]] = None,
         phids: Optional[List[str]] = None,
+        order: str = "",
+        after: str = "",
         limit: int = 100,
     ) -> dict:
         """
@@ -1772,10 +1872,16 @@ def register_tools(  # noqa: C901
         Args:
             project_phids: List of project PHIDs to search columns in
             phids: List of specific column PHIDs to search for
+            order: Result ordering (e.g. "newest", "oldest")
+            after: Opaque cursor from a previous call's ``next_after``;
+                fetches the next page. Pass the same filters and order
+                as the original call.
             limit: Maximum number of results to return (default: 100, max: 1000)
 
         Returns:
-            Search results with column data and pagination metadata
+            Search results with column data and pagination metadata,
+            plus ``next_after`` (cursor string for the next page, or
+            null when no more results exist).
         """
         # Initialize None parameters to empty lists
         if project_phids is None:
@@ -1795,13 +1901,12 @@ def register_tools(  # noqa: C901
 
         result = client.project.search_columns(
             constraints=constraints if constraints else None,
+            order=order or None,
+            after=after or None,
             limit=limit,
         )
 
-        # Add pagination metadata
-        result = _add_pagination_metadata(result, result.get("cursor"))
-
-        return {"success": True, "columns": result}
+        return _paged_search_response("columns", result)
 
     @mcp.tool()
     @handle_api_errors
@@ -1845,6 +1950,8 @@ def register_tools(  # noqa: C901
     @optimize_token_usage
     def pha_workboard_search_tasks_by_column(
         column_phid: str,
+        order: str = "",
+        after: str = "",
         limit: int = 100,
     ) -> dict:
         """
@@ -1852,10 +1959,16 @@ def register_tools(  # noqa: C901
 
         Args:
             column_phid: Column PHID to search tasks in
+            order: Result ordering (e.g. "priority", "updated")
+            after: Opaque cursor from a previous call's ``next_after``;
+                fetches the next page. Pass the same filters and order
+                as the original call.
             limit: Maximum number of results to return (default: 100, max: 1000)
 
         Returns:
-            Search results with task data and pagination metadata
+            Search results with task data and pagination metadata,
+            plus ``next_after`` (cursor string for the next page, or
+            null when no more results exist).
         """
         client = get_client_func()
 
@@ -1866,10 +1979,9 @@ def register_tools(  # noqa: C901
 
         result = client.maniphest.search_tasks(
             constraints=constraints,
+            order=order or None,
+            after=after or None,
             limit=limit,
         )
 
-        # Add pagination metadata
-        result = _add_pagination_metadata(result, result.get("cursor"))
-
-        return {"success": True, "tasks": result}
+        return _paged_search_response("tasks", result)
