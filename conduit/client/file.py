@@ -2,7 +2,7 @@ import base64
 import hashlib
 import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from conduit.client.base import BasePhabricatorClient, PhabricatorAPIError
 from conduit.utils import build_search_params
@@ -18,13 +18,21 @@ class FileClient(BasePhabricatorClient):
     CHUNK_POLL_INTERVAL_SECONDS = 1.0
 
     def search_files(
-        self, constraints: Dict[str, Any] = None, limit: int = 100
+        self,
+        constraints: Dict[str, Any] = None,
+        order: Optional[Union[str, List[str]]] = None,
+        before: Optional[str] = None,
+        after: Optional[str] = None,
+        limit: int = 100,
     ) -> Dict[str, Any]:
         """
         Read information about files.
 
         Args:
             constraints: Search constraints
+            order: Result ordering (builtin key or custom column list)
+            before: Cursor for previous page
+            after: Cursor for next page
             limit: Maximum number of results to return
 
         Returns:
@@ -32,6 +40,9 @@ class FileClient(BasePhabricatorClient):
         """
         params = build_search_params(
             constraints=constraints,
+            order=order,
+            before=before,
+            after=after,
             limit=limit,
         )
         return self._make_request("file.search", params)

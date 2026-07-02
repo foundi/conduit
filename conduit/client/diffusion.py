@@ -1,4 +1,4 @@
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Union
 
 from conduit.client.base import BasePhabricatorClient
 from conduit.utils import build_search_params, build_transaction_params
@@ -6,13 +6,21 @@ from conduit.utils import build_search_params, build_transaction_params
 
 class DiffusionClient(BasePhabricatorClient):
     def search_repositories(
-        self, constraints: Dict[str, Any] = None, limit: int = 100
+        self,
+        constraints: Dict[str, Any] = None,
+        order: Optional[Union[str, List[str]]] = None,
+        before: Optional[str] = None,
+        after: Optional[str] = None,
+        limit: int = 100,
     ) -> Dict[str, Any]:
         """
         Read information about repositories.
 
         Args:
             constraints: Search constraints
+            order: Result ordering (builtin key or custom column list)
+            before: Cursor for previous page
+            after: Cursor for next page
             limit: Maximum number of results to return
 
         Returns:
@@ -20,6 +28,9 @@ class DiffusionClient(BasePhabricatorClient):
         """
         params = build_search_params(
             constraints=constraints,
+            order=order,
+            before=before,
+            after=after,
             limit=limit,
         )
         return self._make_request("diffusion.repository.search", params)
@@ -86,13 +97,21 @@ class DiffusionClient(BasePhabricatorClient):
         return self.edit_repository(transactions)
 
     def search_commits(
-        self, constraints: Dict[str, Any] = None, limit: int = 100
+        self,
+        constraints: Dict[str, Any] = None,
+        order: Optional[Union[str, List[str]]] = None,
+        before: Optional[str] = None,
+        after: Optional[str] = None,
+        limit: int = 100,
     ) -> Dict[str, Any]:
         """
         Read information about commits.
 
         Args:
             constraints: Search constraints
+            order: Result ordering (builtin key or custom column list)
+            before: Cursor for previous page
+            after: Cursor for next page
             limit: Maximum number of results to return
 
         Returns:
@@ -100,6 +119,9 @@ class DiffusionClient(BasePhabricatorClient):
         """
         params = build_search_params(
             constraints=constraints,
+            order=order,
+            before=before,
+            after=after,
             limit=limit,
         )
         return self._make_request("diffusion.commit.search", params)
