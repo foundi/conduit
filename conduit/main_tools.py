@@ -9,13 +9,20 @@ from conduit.client.types import (
     ManiphestSearchConstraints,
     ManiphestTaskTransactionComment,
     ManiphestTaskTransactionDescription,
+    ManiphestTaskTransactionEdit,
     ManiphestTaskTransactionOwner,
     ManiphestTaskTransactionPriority,
     ManiphestTaskTransactionProjectsAdd,
     ManiphestTaskTransactionProjectsRemove,
     ManiphestTaskTransactionProjectsSet,
+    ManiphestTaskTransactionSpace,
     ManiphestTaskTransactionStatus,
+    ManiphestTaskTransactionSubscribersAdd,
+    ManiphestTaskTransactionSubscribersRemove,
+    ManiphestTaskTransactionSubscribersSet,
+    ManiphestTaskTransactionSubtype,
     ManiphestTaskTransactionTitle,
+    ManiphestTaskTransactionView,
     UserSearchAttachments,
     UserSearchConstraints,
 )
@@ -221,6 +228,92 @@ def _inject_file_refs(
     return append_file_references(text, ids)
 
 
+def _load_task_template(
+    client: PhabricatorClient,
+    task_id: str,
+) -> Dict[str, Any]:
+    """Fetch a task and return its inheritable fields as a template dict.
+
+    Strips a leading "T"/"t" prefix when the remainder is all digits,
+    then searches by numeric id or PHID.
+
+    Args:
+        client: Phabricator client.
+        task_id: T-number (e.g. "T42"), plain digits, or PHID.
+
+    Returns:
+        Dict with keys: view, edit, space, owner, subtype,
+        priority_value, priority_keyword, description, custom_type,
+        custom_schedule, projects, subscribers.
+
+    Raises:
+        ValueError: When no task matches task_id.
+    """
+    # Normalise T-prefix: "T42" → "42", "t42" → "42"
+    normalised = task_id
+    if task_id and task_id[0] in ("T", "t") and task_id[1:].isdigit():
+        normalised = task_id[1:]
+
+    if normalised.isdigit():
+        constraints = {"ids": [int(normalised)]}
+    else:
+        constraints = {"phids": [task_id]}
+
+    result = client.maniphest.search_tasks(
+        constraints=constraints,
+        attachments={"projects": True, "subscribers": True},
+        limit=1,
+    )
+
+    data = result.get("data", [])
+    if not data:
+        raise ValueError(f"Template task '{task_id}' not found")
+
+    record = data[0]
+    fields = record.get("fields", {})
+    attachments = record.get("attachments", {})
+
+    raw_desc = fields.get("description")
+    if isinstance(raw_desc, dict):
+        description = raw_desc.get("raw")
+    elif isinstance(raw_desc, str):
+        description = raw_desc
+    else:
+        description = None
+
+    priority_value = fields.get("priority", {}).get("value")
+    priority_info = client.maniphest.get_priority_info()
+    priority_map = {
+        entry["value"]: entry["keywords"][0]
+        for entry in priority_info.get("data", [])
+        if entry.get("keywords")
+    }
+    priority_keyword = priority_map.get(priority_value)
+
+    return {
+        "view": fields.get("policy", {}).get("view"),
+        "edit": fields.get("policy", {}).get("edit"),
+        "space": fields.get("spacePHID"),
+        "owner": fields.get("ownerPHID"),
+        "subtype": fields.get("subtype"),
+        "priority_value": priority_value,
+        "priority_keyword": priority_keyword,
+        "description": description,
+        "custom_type": fields.get("custom.foundi:type"),
+        "custom_schedule": fields.get("custom.foundi:schedule"),
+        "projects": (
+            attachments
+            .get("projects", {})
+            .get("projectPHIDs", [])
+        ),
+        "subscribers": (
+            attachments
+            .get("subscribers", {})
+            .get("subscriberPHIDs", [])
+        ),
+    }
+
+
 def register_tools(  # noqa: C901
     mcp: FastMCP,
     get_client_func: Callable[[], PhabricatorClient],
@@ -371,30 +464,149 @@ def register_tools(  # noqa: C901
         title: str,
         description: str = "",
         owner_phid: str = "",
+        template_task_id: Optional[str] = None,
+        space: Optional[str] = None,
+        subscribers: Optional[List[str]] = None,
         file_phids: Optional[List[str]] = None,
     ) -> dict:
         """
         Create a new Phabricator task.
 
         Args:
-            title: Task title
-            description: Task description
-            owner_phid: PHID of the user to assign this task to
-            file_phids: Optional list of file PHIDs or monograms (``F1234``)
-                to attach. Each is rendered as ``{F<id>}`` and appended to
-                the description.
+            title: Task title.
+            description: Task description.
+            owner_phid: PHID of the user to assign this task to.
+            template_task_id: Load another task (T-number or PHID) and
+                use its fields as a template — view/edit policy, tags,
+                subscribers, space, subtype, owner, priority,
+                description, and foundi custom fields are inherited.
+                Any argument you pass to this call overrides the
+                template's value. title is always taken from this call;
+                status is not inherited.
+            space: PHID of the Space to file the task into (e.g.
+                "PHID-SPCE-..."). The task inherits that Space's access
+                policy. Omit to use the default Space.
+            subscribers: List of subscriber PHIDs or usernames to CC on
+                the new task (overwrites the default subscriber set).
+            file_phids: Optional list of file PHIDs or monograms
+                (``F1234``) to attach. Each is rendered as ``{F<id>}``
+                and appended to the description.
 
         Returns:
-            Created task information
+            Created task information.
         """
         client = get_client_func()
-        description = _inject_file_refs(description, file_phids, client)
-        result = client.maniphest.create_task(
-            title=title,
-            description=description,
-            owner_phid=owner_phid,
+
+        tpl = (
+            _load_task_template(client, template_task_id)
+            if template_task_id
+            else None
         )
-        return {"success": True, "task": result}
+
+        # Caller values take precedence; template fills in blanks.
+        effective_description = (
+            description if description
+            else (tpl["description"] if tpl else "")
+        )
+        effective_description = _inject_file_refs(
+            effective_description, file_phids, client
+        )
+        effective_owner = (
+            owner_phid if owner_phid
+            else (tpl["owner"] if tpl else "")
+        )
+        effective_space = (
+            space if space is not None
+            else (tpl["space"] if tpl else None)
+        )
+        effective_subscribers = (
+            subscribers if subscribers is not None
+            else (tpl["subscribers"] if tpl else None)
+        )
+
+        transactions = [
+            ManiphestTaskTransactionTitle(type="title", value=title)
+        ]
+        if effective_description:
+            transactions.append(
+                ManiphestTaskTransactionDescription(
+                    type="description", value=effective_description
+                )
+            )
+        if effective_owner:
+            transactions.append(
+                ManiphestTaskTransactionOwner(
+                    type="owner", value=effective_owner
+                )
+            )
+        if tpl:
+            if tpl["view"]:
+                transactions.append(
+                    ManiphestTaskTransactionView(
+                        type="view", value=tpl["view"]
+                    )
+                )
+            if tpl["edit"]:
+                transactions.append(
+                    ManiphestTaskTransactionEdit(
+                        type="edit", value=tpl["edit"]
+                    )
+                )
+            if tpl["projects"]:
+                transactions.append(
+                    ManiphestTaskTransactionProjectsSet(
+                        type="projects.set", value=tpl["projects"]
+                    )
+                )
+        if effective_subscribers is not None:
+            transactions.append(
+                ManiphestTaskTransactionSubscribersSet(
+                    type="subscribers.set", value=effective_subscribers
+                )
+            )
+        if effective_space:
+            transactions.append(
+                ManiphestTaskTransactionSpace(
+                    type="space", value=effective_space
+                )
+            )
+        if tpl:
+            if tpl["subtype"] and tpl["subtype"] != "default":
+                transactions.append(
+                    ManiphestTaskTransactionSubtype(
+                        type="subtype", value=tpl["subtype"]
+                    )
+                )
+            if tpl["priority_keyword"]:
+                transactions.append(
+                    ManiphestTaskTransactionPriority(
+                        type="priority",
+                        value=tpl["priority_keyword"],
+                    )
+                )
+            if tpl["custom_type"] is not None:
+                transactions.append(
+                    {"type": "custom.foundi:type", "value": tpl["custom_type"]}
+                )
+            if tpl["custom_schedule"] is not None:
+                transactions.append(
+                    {
+                        "type": "custom.foundi:schedule",
+                        "value": tpl["custom_schedule"],
+                    }
+                )
+
+        result = client.maniphest.edit_task(
+            object_identifier=None, transactions=transactions
+        )
+        # maniphest.edit returns {"object": {...}, "transactions": [...]};
+        # surface the created object as `task` for a stable return shape.
+        task = (
+            result.get("object", result)
+            if isinstance(result, dict)
+            else result
+        )
+        return {"success": True, "task": task}
 
     @mcp.tool()
     @handle_api_errors
@@ -424,6 +636,9 @@ def register_tools(  # noqa: C901
         projects_add: Optional[List[str]] = None,
         projects_remove: Optional[List[str]] = None,
         projects_set: Optional[List[str]] = None,
+        subscribers_add: Optional[List[str]] = None,
+        subscribers_remove: Optional[List[str]] = None,
+        subscribers_set: Optional[List[str]] = None,
         file_phids: Optional[List[str]] = None,
     ) -> dict:
         """
@@ -438,7 +653,13 @@ def register_tools(  # noqa: C901
             owner_phid: The PHID of the new owner for the task.
             projects_add: List of project PHIDs to add the task to.
             projects_remove: List of project PHIDs to remove the task from.
-            projects_set: List of project PHIDs to set (overwrites current projects).
+            projects_set: List of project PHIDs to set (overwrites current
+                projects).
+            subscribers_add: List of subscriber PHIDs or usernames to add.
+            subscribers_remove: List of subscriber PHIDs or usernames to
+                remove.
+            subscribers_set: List of subscriber PHIDs or usernames to set
+                (overwrites current subscribers).
             file_phids: Optional list of file PHIDs or monograms to attach.
                 ``description`` must also be provided so we know what to
                 append the ``{F<id>}`` refs to; otherwise this raises.
@@ -495,6 +716,24 @@ def register_tools(  # noqa: C901
             transactions.append(
                 ManiphestTaskTransactionProjectsSet(
                     type="projects.set", value=projects_set
+                )
+            )
+        if subscribers_add is not None:
+            transactions.append(
+                ManiphestTaskTransactionSubscribersAdd(
+                    type="subscribers.add", value=subscribers_add
+                )
+            )
+        if subscribers_remove is not None:
+            transactions.append(
+                ManiphestTaskTransactionSubscribersRemove(
+                    type="subscribers.remove", value=subscribers_remove
+                )
+            )
+        if subscribers_set is not None:
+            transactions.append(
+                ManiphestTaskTransactionSubscribersSet(
+                    type="subscribers.set", value=subscribers_set
                 )
             )
 
