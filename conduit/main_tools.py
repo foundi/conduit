@@ -863,14 +863,23 @@ def register_tools(  # noqa: C901
         task_id: str,
         relationship_type: Literal["subtask", "parent"],
         target_ids: str,
+        mode: Literal["add", "remove", "set"] = "add",
     ) -> dict:
         """
-        Update task relationships (subtasks or parents).
+        Add, remove, or replace task relationships (subtasks or parents).
 
         Args:
             task_id: The PHID of the task to update (must be PHID format, not numeric ID)
             relationship_type: Type of relationship ("subtask" or "parent")
             target_ids: Comma-separated list of target task PHIDs (must be PHID format, not numeric IDs)
+            mode: How target_ids is applied. Defaults to "add".
+                "add" attaches target_ids and leaves every existing
+                relationship intact - use this to attach a new subtask.
+                "remove" detaches only the listed target_ids.
+                "set" is DESTRUCTIVE: target_ids becomes the complete list,
+                and every existing relationship NOT listed is REMOVED. Only
+                pass "set" when target_ids already contains the full intended
+                list, which requires reading the current relationships first.
 
         Returns:
             Success status
@@ -886,20 +895,26 @@ def register_tools(  # noqa: C901
             return {"success": False, "error": "No valid target IDs provided"}
 
         if relationship_type == "subtask":
-            transaction_type = "subtasks.set"
+            edge_type = "subtasks"
         elif relationship_type == "parent":
-            transaction_type = "parents.set"
+            edge_type = "parents"
         else:
             return {
                 "success": False,
                 "error": "Invalid relationship_type. Use 'subtask' or 'parent'",
             }
 
+        if mode not in ("add", "remove", "set"):
+            return {
+                "success": False,
+                "error": "Invalid mode. Use 'add', 'remove', or 'set'",
+            }
+
         client.maniphest.edit_task(
             object_identifier=task_id,
             transactions=[
                 {
-                    "type": transaction_type,
+                    "type": f"{edge_type}.{mode}",
                     "value": target_list,
                 }
             ],
