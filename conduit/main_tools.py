@@ -3,6 +3,7 @@ from functools import wraps
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 from fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from conduit.client.types import (
     ManiphestSearchAttachments,
@@ -34,6 +35,32 @@ from conduit.utils.remarkup import (
     append_file_references,
     parse_file_id_from_monogram,
     resolve_file_identifiers,
+)
+
+
+# Tool Annotations
+#
+# Hints for MCP clients about each tool's side effects. Every tool talks only
+# to the configured Phabricator instance, a closed domain, so openWorldHint is
+# False throughout. Writes that overwrite existing fields or lists are marked
+# destructive; writes that only add new objects or comments are not.
+
+READ_ONLY = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+
+# Creates an object or posts a comment; repeating it creates another one.
+ADDITIVE_WRITE = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=False,
+)
+
+# Sets fields to given values; repeating it with the same arguments is a no-op.
+OVERWRITING_WRITE = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=True,
+    idempotentHint=True,
+    openWorldHint=False,
 )
 
 
@@ -326,7 +353,7 @@ def register_tools(  # noqa: C901
         get_client_func: Function to get Phabricator client instance
     """
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     def pha_user_whoami() -> dict:
         """
@@ -340,7 +367,7 @@ def register_tools(  # noqa: C901
 
         return {"success": True, "user": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     @optimize_token_usage
     def pha_user_search(
@@ -458,7 +485,7 @@ def register_tools(  # noqa: C901
             "next_after": _cursor_next_after(result),
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=ADDITIVE_WRITE)
     @handle_api_errors
     def pha_task_create(
         title: str,
@@ -608,7 +635,7 @@ def register_tools(  # noqa: C901
         )
         return {"success": True, "task": task}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     def pha_task_get(task_id: str) -> dict:
         """
@@ -624,7 +651,7 @@ def register_tools(  # noqa: C901
         result = client.maniphest.get_task(task_id)
         return {"success": True, "task": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=OVERWRITING_WRITE)
     @handle_api_errors
     def pha_task_update(
         task_id: str,
@@ -743,7 +770,7 @@ def register_tools(  # noqa: C901
         )
         return {"success": True}
 
-    @mcp.tool()
+    @mcp.tool(annotations=ADDITIVE_WRITE)
     @handle_api_errors
     def pha_task_add_comment(
         task_id: str,
@@ -775,7 +802,7 @@ def register_tools(  # noqa: C901
         )
         return {"success": True}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     @optimize_token_usage
     def pha_task_get_transactions(task_id: str) -> dict:
@@ -813,7 +840,7 @@ def register_tools(  # noqa: C901
 
         return {"success": True, "transactions": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     def pha_task_get_personal(
         task_type: Literal["assigned", "authored"] = "assigned",
@@ -857,7 +884,7 @@ def register_tools(  # noqa: C901
                 "error": "Invalid task_type. Use 'assigned' or 'authored'",
             }
 
-    @mcp.tool()
+    @mcp.tool(annotations=OVERWRITING_WRITE)
     @handle_api_errors
     def pha_task_update_relationships(
         task_id: str,
@@ -921,7 +948,7 @@ def register_tools(  # noqa: C901
         )
         return {"success": True}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     @optimize_token_usage
     def pha_task_search_advanced(
@@ -1077,7 +1104,7 @@ def register_tools(  # noqa: C901
 
     # Diffusion (Repository) Tools
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     @optimize_token_usage
     def pha_repository_search(
@@ -1116,7 +1143,7 @@ def register_tools(  # noqa: C901
 
         return _paged_search_response("repositories", result)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ADDITIVE_WRITE)
     @handle_api_errors
     def pha_repository_create(
         name: str,
@@ -1147,7 +1174,7 @@ def register_tools(  # noqa: C901
 
         return {"success": True, "repository": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     def pha_repository_info(repository_identifier: str) -> dict:
         """
@@ -1218,7 +1245,7 @@ def register_tools(  # noqa: C901
                 "error": f"Repository '{repository_identifier}' not found",
             }
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     @optimize_token_usage
     def pha_repository_browse(
@@ -1250,7 +1277,7 @@ def register_tools(  # noqa: C901
 
         return {"success": True, "browse_result": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     def pha_repository_file_content(
         repository: str,
@@ -1301,7 +1328,7 @@ def register_tools(  # noqa: C901
         # Combine metadata with actual decoded content
         return {"success": True, "file_content": file_content, "metadata": file_info}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     @optimize_token_usage
     def pha_repository_history(
@@ -1336,7 +1363,7 @@ def register_tools(  # noqa: C901
 
         return {"success": True, "history": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     def pha_repository_branches(repository: str) -> dict:
         """
@@ -1354,7 +1381,7 @@ def register_tools(  # noqa: C901
 
         return {"success": True, "branches": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     def pha_repository_commits_search(
         repository: str = "",
@@ -1403,7 +1430,7 @@ def register_tools(  # noqa: C901
 
     # Differential (Code Review) Tools
 
-    @mcp.tool()
+    @mcp.tool(annotations=ADDITIVE_WRITE)
     @handle_api_errors
     def pha_diff_create_from_content(
         diff_content: str,
@@ -1442,7 +1469,7 @@ def register_tools(  # noqa: C901
 
         return {"success": True, "diff": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=ADDITIVE_WRITE)
     @handle_api_errors
     def pha_diff_create(
         diff_id: str,
@@ -1486,7 +1513,7 @@ def register_tools(  # noqa: C901
 
         return {"success": True, "revision": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     @optimize_token_usage
     def pha_diff_search(
@@ -1542,7 +1569,7 @@ def register_tools(  # noqa: C901
 
         return _paged_search_response("revisions", result)
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     def pha_diff_get(revision_id: str) -> dict:
         """
@@ -1580,7 +1607,7 @@ def register_tools(  # noqa: C901
         else:
             return {"success": False, "error": f"Revision {revision_id} not found"}
 
-    @mcp.tool()
+    @mcp.tool(annotations=ADDITIVE_WRITE)
     @handle_api_errors
     def pha_diff_add_comment(
         revision_id: str,
@@ -1619,7 +1646,16 @@ def register_tools(  # noqa: C901
 
         return {"success": True, "comment_added": True}
 
-    @mcp.tool()
+    # Overwrites revision fields, but the optional comment is posted anew on
+    # every call, so repeating it is not a no-op.
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=False,
+            openWorldHint=False,
+        )
+    )
     @handle_api_errors
     def pha_diff_update(
         revision_id: str,
@@ -1667,7 +1703,7 @@ def register_tools(  # noqa: C901
 
         return {"success": True, "revision": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     def pha_diff_get_content(diff_phid: str) -> dict:
         """
@@ -1711,7 +1747,7 @@ def register_tools(  # noqa: C901
 
         return {"success": True, "diff_content": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     def pha_diff_get_commit_message(revision_id: str) -> dict:
         """
@@ -1735,7 +1771,7 @@ def register_tools(  # noqa: C901
 
     # File API Tools
 
-    @mcp.tool()
+    @mcp.tool(annotations=ADDITIVE_WRITE)
     @handle_api_errors
     def pha_file_upload(
         filename: str,
@@ -1776,7 +1812,7 @@ def register_tools(  # noqa: C901
         result["remarkup_ref"] = f"{{F{result['id']}}}"
         return {"success": True, "file": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     def pha_file_download(file: str) -> dict:
         """
@@ -1810,7 +1846,7 @@ def register_tools(  # noqa: C901
             },
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     def pha_file_info(file: str) -> dict:
         """Look up metadata for a single file by monogram or PHID."""
@@ -1820,7 +1856,7 @@ def register_tools(  # noqa: C901
             "file": _fetch_file_legacy_info(client, file),
         }
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     @optimize_token_usage
     def pha_file_search(
@@ -1863,7 +1899,7 @@ def register_tools(  # noqa: C901
 
     # Project API Tools
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     @optimize_token_usage
     def pha_project_search(
@@ -1961,7 +1997,7 @@ def register_tools(  # noqa: C901
 
         return _paged_search_response("projects", result)
 
-    @mcp.tool()
+    @mcp.tool(annotations=ADDITIVE_WRITE)
     @handle_api_errors
     def pha_project_create(
         name: str,
@@ -1992,7 +2028,7 @@ def register_tools(  # noqa: C901
 
         return {"success": True, "project": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     def pha_project_get(project_identifier: str) -> dict:
         """
@@ -2062,7 +2098,7 @@ def register_tools(  # noqa: C901
                 "error": f"Project '{project_identifier}' not found",
             }
 
-    @mcp.tool()
+    @mcp.tool(annotations=OVERWRITING_WRITE)
     @handle_api_errors
     def pha_project_update(
         project_phid: str,
@@ -2110,7 +2146,7 @@ def register_tools(  # noqa: C901
 
     # Workboard Tools
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     @optimize_token_usage
     def pha_workboard_search_columns(
@@ -2162,7 +2198,16 @@ def register_tools(  # noqa: C901
 
         return _paged_search_response("columns", result)
 
-    @mcp.tool()
+    # Changes only the task's board position, and moving it to the same
+    # column again leaves the board unchanged.
+    @mcp.tool(
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=True,
+            openWorldHint=False,
+        )
+    )
     @handle_api_errors
     def pha_workboard_move_task(
         task_id: str,
@@ -2199,7 +2244,7 @@ def register_tools(  # noqa: C901
 
         return {"success": True, "task": result}
 
-    @mcp.tool()
+    @mcp.tool(annotations=READ_ONLY)
     @handle_api_errors
     @optimize_token_usage
     def pha_workboard_search_tasks_by_column(
